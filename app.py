@@ -1,4 +1,3 @@
-
 import streamlit as st
 import pandas as pd
 
@@ -14,6 +13,7 @@ from src.auth import (
 from src.student_profile import show_student_profile
 from src.database import get_all_programmes
 from src.recommendation_page import show_recommendations
+from src.ai_assistant import show_ai_assistant
 
 
 # ============================================================
@@ -26,6 +26,7 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
+
 
 
 # ============================================================
@@ -86,30 +87,71 @@ def load_design():
         font-weight: 650 !important;
     }
 
-    /* Text */
+    /* Paragraphs */
 
     p {
         color: #555D75;
     }
 
-    /* Buttons */
+    /* Buttons - Improved Visibility */
 
     .stButton > button,
-    .stFormSubmitButton > button {
-        background-color: #635BDB;
-        color: white !important;
-        border: none;
+    .stFormSubmitButton > button,
+    .stDownloadButton > button,
+    .stLinkButton > a {
+
+        background-color: #635BDB !important;
+
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+
+        border: 1px solid #635BDB !important;
         border-radius: 9px;
+
         padding: 10px 18px;
-        font-weight: 600;
+
+        font-weight: 700 !important;
+
         transition: 0.2s ease;
     }
 
+    /* Force nested button text to remain white */
+
+    .stButton > button *,
+    .stFormSubmitButton > button *,
+    .stDownloadButton > button *,
+    .stLinkButton > a * {
+
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+    }
+
+    /* Button hover */
+
     .stButton > button:hover,
-    .stFormSubmitButton > button:hover {
-        background-color: #5048C6;
-        color: white !important;
-        border: none;
+    .stFormSubmitButton > button:hover,
+    .stDownloadButton > button:hover,
+    .stLinkButton > a:hover {
+
+        background-color: #5048C6 !important;
+
+        border-color: #5048C6 !important;
+
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+    }
+
+    /* Disabled buttons */
+
+    .stButton > button:disabled,
+    .stFormSubmitButton > button:disabled {
+
+        background-color: #7770DF !important;
+
+        color: #FFFFFF !important;
+        -webkit-text-fill-color: #FFFFFF !important;
+
+        opacity: 1 !important;
     }
 
     /* Input fields */
@@ -121,7 +163,7 @@ def load_design():
         border-radius: 8px;
     }
 
-    /* Cards */
+    /* Dashboard cards */
 
     .cg-card {
         background: white;
@@ -219,6 +261,7 @@ def load_design():
 
 
 load_design()
+
 
 
 # ============================================================
@@ -422,6 +465,7 @@ def dashboard_page():
     col1, col2, col3 = st.columns(3)
 
     with col1:
+
         metric_card(
             "Education Programmes",
             "933",
@@ -429,6 +473,7 @@ def dashboard_page():
         )
 
     with col2:
+
         metric_card(
             "Institutions",
             "63",
@@ -436,6 +481,7 @@ def dashboard_page():
         )
 
     with col3:
+
         metric_card(
             "Education Sectors",
             "3",
@@ -531,7 +577,6 @@ def student_profile_page(client):
         st.exception(e)
 
 
-
 # ============================================================
 # RECOMMENDATIONS PAGE
 # ============================================================
@@ -553,8 +598,8 @@ def programme_explorer_page():
     st.title("🏛️ Programme Explorer")
 
     st.write(
-        "Explore higher education programmes available "
-        "across Sri Lanka."
+        "Explore higher education programmes offered by "
+        "government, private and vocational institutions in Sri Lanka."
     )
 
     try:
@@ -563,136 +608,229 @@ def programme_explorer_page():
 
         if not programmes:
 
-            st.warning("No programme records could be retrieved.")
+            st.warning(
+                "No programme records are currently available."
+            )
+
             return
 
         df = pd.DataFrame(programmes)
 
-        st.markdown("### Search and Filter Programmes")
+        if df.empty:
 
-        search = st.text_input(
-            "Search by programme, institution, career field or district",
-            placeholder="Example: Data Science"
+            st.warning("No programme records are available.")
+
+            return
+
+        # --------------------------------------------------
+        # HELPER FUNCTIONS
+        # --------------------------------------------------
+
+        def normalise(value):
+
+            if value is None:
+                return ""
+
+            return str(value).strip()
+
+        def get_value(row, *possible_names):
+
+            for name in possible_names:
+
+                if name in row.index:
+
+                    value = row[name]
+
+                    if pd.notna(value) and str(value).strip():
+
+                        return value
+
+            return None
+
+        def get_filter_column(*possible_names):
+
+            for name in possible_names:
+
+                if name in df.columns:
+
+                    return name
+
+            return None
+
+        def filter_options(column):
+
+            if not column:
+                return ["All"]
+
+            values = (
+                df[column]
+                .dropna()
+                .astype(str)
+                .str.strip()
+            )
+
+            values = sorted(
+                value for value in values.unique()
+                if value
+            )
+
+            return ["All"] + values
+
+        def format_value(value):
+
+            if value is None or pd.isna(value):
+
+                return "Not available"
+
+            return str(value).strip()
+
+        # --------------------------------------------------
+        # SEARCH
+        # --------------------------------------------------
+
+        st.subheader("Search and Filter Programmes")
+
+        search_text = st.text_input(
+            "Search programmes",
+            placeholder=(
+                "Search programme, institution, career field or district..."
+            )
         )
 
-        filter_col1, filter_col2, filter_col3 = st.columns(3)
+        # --------------------------------------------------
+        # FILTER COLUMNS
+        # --------------------------------------------------
 
-        with filter_col1:
+        institution_col = get_filter_column(
+            "institution_type", "Institution_Type"
+        )
 
-            if "Institution_Type" in df.columns:
+        district_col = get_filter_column(
+            "district", "District"
+        )
 
-                type_column = "Institution_Type"
+        qualification_col = get_filter_column(
+            "qualification_type", "Qualification_Type"
+        )
 
-            elif "institution_type" in df.columns:
+        career_col = get_filter_column(
+            "career_field", "Career_Field"
+        )
 
-                type_column = "institution_type"
+        study_mode_col = get_filter_column(
+            "study_mode", "Study_Mode"
+        )
 
-            else:
+        # --------------------------------------------------
+        # FILTERS
+        # --------------------------------------------------
 
-                type_column = None
+        col1, col2, col3 = st.columns(3)
 
-            if type_column:
+        with col1:
 
-                institution_types = sorted(
-                    df[type_column].dropna().astype(str).unique().tolist()
-                )
+            institution_filter = st.selectbox(
+                "Institution Type",
+                filter_options(institution_col),
+                key="explorer_institution"
+            )
 
-                selected_type = st.selectbox(
-                    "Institution Type",
-                    ["All"] + institution_types
-                )
+        with col2:
 
-            else:
+            district_filter = st.selectbox(
+                "District",
+                filter_options(district_col),
+                key="explorer_district"
+            )
 
-                selected_type = "All"
+        with col3:
 
-        with filter_col2:
+            qualification_filter = st.selectbox(
+                "Qualification",
+                filter_options(qualification_col),
+                key="explorer_qualification"
+            )
 
-            if "District" in df.columns:
-                district_column = "District"
-            elif "district" in df.columns:
-                district_column = "district"
-            else:
-                district_column = None
+        col4, col5 = st.columns(2)
 
-            if district_column:
+        with col4:
 
-                districts = sorted(
-                    df[district_column].dropna().astype(str).unique().tolist()
-                )
+            career_filter = st.selectbox(
+                "Career Field",
+                filter_options(career_col),
+                key="explorer_career"
+            )
 
-                selected_district = st.selectbox(
-                    "District",
-                    ["All"] + districts
-                )
+        with col5:
 
-            else:
+            study_mode_filter = st.selectbox(
+                "Study Mode",
+                filter_options(study_mode_col),
+                key="explorer_study_mode"
+            )
 
-                selected_district = "All"
-
-        with filter_col3:
-
-            if "Qualification_Type" in df.columns:
-                qualification_column = "Qualification_Type"
-            elif "qualification_type" in df.columns:
-                qualification_column = "qualification_type"
-            else:
-                qualification_column = None
-
-            if qualification_column:
-
-                qualifications = sorted(
-                    df[qualification_column]
-                    .dropna()
-                    .astype(str)
-                    .unique()
-                    .tolist()
-                )
-
-                selected_qualification = st.selectbox(
-                    "Qualification",
-                    ["All"] + qualifications
-                )
-
-            else:
-
-                selected_qualification = "All"
-
-        # Apply filters
+        # --------------------------------------------------
+        # APPLY FILTERS
+        # --------------------------------------------------
 
         filtered_df = df.copy()
 
-        if search:
+        filter_conditions = [
+            (institution_col, institution_filter),
+            (district_col, district_filter),
+            (qualification_col, qualification_filter),
+            (career_col, career_filter),
+            (study_mode_col, study_mode_filter)
+        ]
 
-            mask = filtered_df.astype(str).apply(
-                lambda column: column.str.contains(
-                    search,
-                    case=False,
-                    na=False,
-                    regex=False
-                )
-            ).any(axis=1)
+        for column, selected_value in filter_conditions:
 
-            filtered_df = filtered_df[mask]
+            if column and selected_value != "All":
 
-        if selected_type != "All" and type_column:
+                filtered_df = filtered_df[
+                    filtered_df[column]
+                    .astype(str)
+                    .str.strip()
+                    == selected_value
+                ]
 
-            filtered_df = filtered_df[
-                filtered_df[type_column].astype(str) == selected_type
+        # --------------------------------------------------
+        # SEARCH ACROSS RELEVANT FIELDS
+        # --------------------------------------------------
+
+        if search_text.strip():
+
+            search_columns = [
+                "programme_name", "Programme_Name",
+                "institution_name", "Institution_Name",
+                "career_field", "Career_Field",
+                "district", "District",
+                "faculty", "Faculty",
+                "entry_requirements", "Entry_Requirements"
             ]
 
-        if selected_district != "All" and district_column:
-
-            filtered_df = filtered_df[
-                filtered_df[district_column].astype(str) == selected_district
+            available_search_columns = [
+                column for column in search_columns
+                if column in filtered_df.columns
             ]
 
-        if selected_qualification != "All" and qualification_column:
+            if available_search_columns:
 
-            filtered_df = filtered_df[
-                filtered_df[qualification_column].astype(str)
-                == selected_qualification
-            ]
+                search_mask = filtered_df[
+                    available_search_columns
+                ].fillna("").astype(str).apply(
+                    lambda column: column.str.contains(
+                        search_text.strip(),
+                        case=False,
+                        regex=False
+                    )
+                ).any(axis=1)
+
+                filtered_df = filtered_df[search_mask]
+
+        # --------------------------------------------------
+        # RESULTS SUMMARY
+        # --------------------------------------------------
 
         st.divider()
 
@@ -701,15 +839,288 @@ def programme_explorer_page():
             len(filtered_df)
         )
 
-        st.dataframe(
-            filtered_df,
-            use_container_width=True,
-            hide_index=True
+        if filtered_df.empty:
+
+            st.info(
+                "No programmes match your search. "
+                "Try changing your filters."
+            )
+
+            return
+
+        # --------------------------------------------------
+        # PAGINATION
+        # --------------------------------------------------
+
+        results_per_page = st.selectbox(
+            "Results per page",
+            [6, 12, 18, 24],
+            index=1,
+            key="explorer_results_per_page"
         )
+
+        total_results = len(filtered_df)
+
+        total_pages = (
+            total_results + results_per_page - 1
+        ) // results_per_page
+
+        current_page = st.number_input(
+            "Page",
+            min_value=1,
+            max_value=total_pages,
+            value=1,
+            step=1,
+            key="explorer_page_number"
+        )
+
+        start_index = (current_page - 1) * results_per_page
+
+        end_index = start_index + results_per_page
+
+        page_df = filtered_df.iloc[start_index:end_index]
+
+        st.caption(
+            f"Showing {start_index + 1}–"
+            f"{min(end_index, total_results)} "
+            f"of {total_results} programmes | "
+            f"Page {current_page} of {total_pages}"
+        )
+
+        # --------------------------------------------------
+        # DISPLAY PROGRAMME CARDS
+        # --------------------------------------------------
+
+        for _, programme in page_df.iterrows():
+
+            programme_name = format_value(
+                get_value(
+                    programme,
+                    "programme_name", "Programme_Name"
+                )
+            )
+
+            institution_name = format_value(
+                get_value(
+                    programme,
+                    "institution_name", "Institution_Name"
+                )
+            )
+
+            institution_type = format_value(
+                get_value(
+                    programme,
+                    "institution_type", "Institution_Type"
+                )
+            )
+
+            qualification = format_value(
+                get_value(
+                    programme,
+                    "qualification_type", "Qualification_Type"
+                )
+            )
+
+            career_field = format_value(
+                get_value(
+                    programme,
+                    "career_field", "Career_Field"
+                )
+            )
+
+            duration = format_value(
+                get_value(
+                    programme,
+                    "duration", "Duration"
+                )
+            )
+
+            study_mode = format_value(
+                get_value(
+                    programme,
+                    "study_mode", "Study_Mode"
+                )
+            )
+
+            location = format_value(
+                get_value(
+                    programme,
+                    "location", "Location"
+                )
+            )
+
+            district = format_value(
+                get_value(
+                    programme,
+                    "district", "District"
+                )
+            )
+
+            fee = get_value(
+                programme,
+                "total_tuition_fee", "Total_Tuition_Fee"
+            )
+
+            currency = get_value(
+                programme,
+                "fee_currency", "Fee_Currency"
+            )
+
+            fee_status = normalise(
+                get_value(
+                    programme,
+                    "fee_status", "Fee_Status"
+                )
+            )
+
+            entry_requirements = format_value(
+                get_value(
+                    programme,
+                    "entry_requirements", "Entry_Requirements"
+                )
+            )
+
+            required_stream = format_value(
+                get_value(
+                    programme,
+                    "required_al_stream", "Required_AL_Stream"
+                )
+            )
+
+            required_subjects = format_value(
+                get_value(
+                    programme,
+                    "required_al_subjects", "Required_AL_Subjects"
+                )
+            )
+
+            official_url = normalise(
+                get_value(
+                    programme,
+                    "official_url", "Official_URL"
+                )
+            )
+
+            # Fee display
+            # Missing fee information is never treated as free.
+
+            if "free" in fee_status.lower():
+
+                fee_display = "Listed as Free"
+
+            elif fee is not None:
+
+                fee_display = (
+                    f"{currency} {fee}"
+                    if currency
+                    else str(fee)
+                )
+
+            elif fee_status:
+
+                fee_display = fee_status
+
+            else:
+
+                fee_display = "Not available"
+
+            # --------------------------------------------------
+            # PROGRAMME CARD
+            # --------------------------------------------------
+
+            with st.container(border=True):
+
+                st.subheader(programme_name)
+
+                st.markdown(
+                    f"**Institution:** {institution_name}"
+                )
+
+                st.caption(
+                    f"{institution_type} | {career_field}"
+                )
+
+                info1, info2, info3 = st.columns(3)
+
+                with info1:
+
+                    st.markdown("**Qualification**")
+                    st.write(qualification)
+
+                with info2:
+
+                    st.markdown("**Duration**")
+                    st.write(duration)
+
+                with info3:
+
+                    st.markdown("**Study Mode**")
+                    st.write(study_mode)
+
+                info4, info5 = st.columns(2)
+
+                with info4:
+
+                    st.markdown("**Location**")
+
+                    if (
+                        location != "Not available"
+                        and district != "Not available"
+                    ):
+
+                        st.write(f"{location}, {district}")
+
+                    elif location != "Not available":
+
+                        st.write(location)
+
+                    else:
+
+                        st.write(district)
+
+                with info5:
+
+                    st.markdown("**Tuition Fee Information**")
+                    st.write(fee_display)
+
+                with st.expander("View Programme Details"):
+
+                    st.markdown("**Entry Requirements**")
+                    st.write(entry_requirements)
+
+                    st.markdown("**Required A/L Stream**")
+                    st.write(required_stream)
+
+                    st.markdown("**Required A/L Subjects**")
+                    st.write(required_subjects)
+
+                    st.markdown("**Fee Status**")
+
+                    st.write(
+                        fee_status if fee_status
+                        else "Not available"
+                    )
+
+                    if (
+                        official_url.startswith("https://")
+                        or official_url.startswith("http://")
+                    ):
+
+                        st.link_button(
+                            "Visit Official Website",
+                            official_url
+                        )
+
+                    else:
+
+                        st.caption(
+                            "Official website link not available."
+                        )
 
     except Exception as e:
 
-        st.error("Unable to retrieve programmes.")
+        st.error("Unable to load the Programme Explorer.")
+
         st.exception(e)
 
 
@@ -719,32 +1130,7 @@ def programme_explorer_page():
 
 def career_assistant_page():
 
-    st.title("🤖 AI Career Assistant")
-
-    st.write(
-        "Get guidance about education opportunities, "
-        "career fields and higher education pathways."
-    )
-
-    st.markdown("""
-    <div class="cg-card">
-        <h3>Career Guidance Assistant</h3>
-        <p>
-            The AI assistant will help students understand
-            their possible education and career pathways.
-        </p>
-        <p>
-            It will use the programme database to provide
-            grounded information about Sri Lankan institutions
-            and available qualifications.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    st.info(
-        "Llama integration is planned for a later development stage. "
-        "The assistant is not yet connected to an AI model."
-    )
+    show_ai_assistant()
 
 
 # ============================================================
@@ -819,8 +1205,8 @@ def application_dashboard():
     ):
 
         logout_user()
+        st.rerun()
 
-   
     # PAGE ROUTING
 
     if page == "Dashboard":
@@ -847,6 +1233,7 @@ def application_dashboard():
         career_assistant_page()
 
     show_footer()
+
 
 # ============================================================
 # APPLICATION ENTRY POINT

@@ -1,15 +1,16 @@
 
 import os
+from functools import lru_cache
+
 import joblib
 import numpy as np
 import pandas as pd
-
 from sklearn.metrics.pairwise import cosine_similarity
 
 
-# --------------------------------------------------
-# 1. LOAD THE SAVED MODEL
-# --------------------------------------------------
+# ============================================================
+# 1. MODEL LOCATION AND LOADING
+# ============================================================
 
 PROJECT_ROOT = os.path.dirname(
     os.path.dirname(os.path.abspath(__file__))
@@ -22,29 +23,139 @@ MODEL_PATH = os.path.join(
 )
 
 
+@lru_cache(maxsize=1)
 def load_recommender():
-    """Load the previously trained TF-IDF model."""
+    """
+    Load the saved TF-IDF recommendation model once per app process.
 
+    The model file must be:
+    models/career_guide_recommender.joblib
+    """
     if not os.path.exists(MODEL_PATH):
         raise FileNotFoundError(
-            f"Model file not found: {MODEL_PATH}"
+            f"Saved recommendation model was not found: {MODEL_PATH}"
         )
 
     model = joblib.load(MODEL_PATH)
 
+    required_keys = [
+        "vectorizer",
+        "programme_vectors",
+        "programme_metadata"
+    ]
+
+    missing_keys = [
+        key for key in required_keys
+        if key not in model
+    ]
+
+    if missing_keys:
+        raise KeyError(
+            "The saved model is missing required items: "
+            + ", ".join(missing_keys)
+        )
+
+    if len(model["programme_metadata"]) != model["programme_vectors"].shape[0]:
+        raise ValueError(
+            "The programme metadata row count does not match "
+            "the number of saved programme vectors."
+        )
+
     return model
 
 
-# --------------------------------------------------
-# 2. BUILD STUDENT PROFILE
-# --------------------------------------------------
+# ============================================================
+# 2. DATA HELPERS
+# ============================================================
+
+def get_value(record, *possible_names, default=None):
+    """Read a value using either PascalCase or snake_case column names."""
+    if record is None:
+        return default
+
+    if isinstance(record, pd.Series):
+        items = record.to_dict()
+    elif isinstance(record, dict):
+        items = record
+    else:
+        return default
+
+    normalised = {
+        str(key).strip().lower().replace(" ", "_"): value
+        for key, value in items.items()
+    }
+
+    for name in possible_names:
+        key = str(name).strip().lower().replace(" ", "_")
+
+        if key in normalised:
+            value = normalised[key]
+
+            if value is None:
+                return default
+
+            try:
+                if pd.isna(value):
+                    return default
+            except (TypeError, ValueError):
+                pass
+
+            return value
+
+    return default
+
+
+def is_true(value):
+    """Safely interpret boolean values stored as bools or strings."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+
+    if value is None:
+        return False
+
+    try:
+        if pd.isna(value):
+            return False
+    except (TypeError, ValueError):
+        pass
+
+    return str(value).strip().lower() in {
+        "true", "1", "yes", "y"
+    }
+
+
+def clean_text(value):
+    """Convert missing values to an empty string."""
+    if value is None:
+        return ""
+
+    try:
+        if pd.isna(value):
+            return ""
+    except (TypeError, ValueError):
+        pass
+
+    text = str(value).strip()
+
+    if text.lower() in {"nan", "none", "null"}:
+        return ""
+
+    return text
+
+
+# ============================================================
+# 3. BUILD STUDENT PROFILE
+# ============================================================
 
 def build_student_profile(student_data):
     """
-    Build text profile using the same four fields
-    used during the original model development.
-    """
+    Build the text profile using the same four fields used
+    during the original TF-IDF model development.
 
+    The current model uses:
+    Student_Stage, AL_Stream, Interests_Select_Up_to_3,
+    Education_Preference.
+    """
     profile_columns = [
         "Student_Stage",
         "AL_Stream",
@@ -55,68 +166,91 @@ def build_student_profile(student_data):
     profile_parts = []
 
     for column in profile_columns:
-        value = student_data.get(column, "")
+        value = clean_text(student_data.get(column, ""))
 
-        if value is not None and not pd.isna(value):
-            value = str(value).strip()
-
-            if value:
-                profile_parts.append(value)
+        if value:
+            profile_parts.append(value)
 
     return " ".join(profile_parts)
 
 
-# --------------------------------------------------
-# 3. ACADEMIC VERIFICATION
-# --------------------------------------------------
+# ============================================================
+# 4. ACADEMIC REQUIREMENT CHECK
+# ============================================================
 
 def check_academic_status(student, programme):
-
-    required_stream = str(
-        programme.get("Required_AL_Stream", "") or ""
-    ).strip()
-
-    student_stream = str(
-        student.get("AL_Stream", "") or ""
-    ).strip()
-
-    requirements_available = programme.get(
-        "Requirements_Available", False
+    """
+    This is a cautious screening indicator, not a formal
+    admission-eligibility decision.
+    """
+    required_stream = clean_text(
+        get_value(
+            programme,
+            "Required_AL_Stream",
+            "required_al_stream"
+        )
     )
 
-    if pd.isna(requirements_available):
-        requirements_available = False
+    student_stream = clean_text(
+        student.get("AL_Stream", "")
+    )
 
-    if not bool(requirements_available):
+    requirements_available = is_true(
+        get_value(
+            programme,
+            "Requirements_Available",
+            "requirements_available",
+            default=False
+        )
+    )
+
+    if not requirements_available:
         return "Not Assessed"
 
     if required_stream and student_stream:
-        if required_stream.lower() != student_stream.lower():
+        if required_stream.casefold() != student_stream.casefold():
             return "Potential Stream Mismatch"
 
+    # A matching or missing stream does not prove eligibility.
     return "Needs Verification"
 
 
-# --------------------------------------------------
-# 4. FINANCIAL CLASSIFICATION
-# --------------------------------------------------
+# ============================================================
+# 5. FINANCIAL INFORMATION CLASSIFICATION
+# ============================================================
 
 def check_financial_status(programme):
+    """
+    Classify the availability of programme fee information.
+    Missing fees are never treated as free.
+    """
+    fee = get_value(
+        programme,
+        "Total_Tuition_Fee",
+        "total_tuition_fee",
+        default=None
+    )
 
-    fee = programme.get("Total_Tuition_Fee", np.nan)
+    currency = clean_text(
+        get_value(
+            programme,
+            "Fee_Currency",
+            "fee_currency"
+        )
+    )
 
-    currency = str(
-        programme.get("Fee_Currency", "") or ""
-    ).strip()
+    fee_status = clean_text(
+        get_value(
+            programme,
+            "Fee_Status",
+            "fee_status"
+        )
+    )
 
-    fee_status = str(
-        programme.get("Fee_Status", "") or ""
-    ).strip()
-
-    if "free" in fee_status.lower():
+    if "free" in fee_status.casefold():
         return "Listed as Free"
 
-    if pd.isna(fee):
+    if fee is None or clean_text(fee) == "":
         return "Unknown - Missing Financial Data"
 
     if not currency:
@@ -125,20 +259,20 @@ def check_financial_status(programme):
     return "Needs Currency Verification"
 
 
-# --------------------------------------------------
-# 5. GENERATE XAI EXPLANATION
-# --------------------------------------------------
+# ============================================================
+# 6. TF-IDF EXPLANATION
+# ============================================================
 
 def generate_explanation(
     student_vector,
     programme_vector,
-    feature_names
+    feature_names,
+    max_features=5
 ):
     """
-    Identify shared TF-IDF terms and their
-    mathematical contribution to similarity.
+    Identify the strongest shared TF-IDF terms contributing
+    to the cosine similarity score.
     """
-
     contributions = student_vector.multiply(
         programme_vector
     ).tocoo()
@@ -146,12 +280,13 @@ def generate_explanation(
     if contributions.nnz == 0:
         return (
             "No shared TF-IDF terms contributed "
-            "to this recommendation."
-        ), []
+            "to this recommendation.",
+            []
+        )
 
     sorted_positions = np.argsort(
         -contributions.data
-    )[:5]
+    )[:max_features]
 
     matched_features = [
         str(feature_names[contributions.col[position]])
@@ -159,8 +294,8 @@ def generate_explanation(
     ]
 
     explanation = (
-        "This programme matched the student's profile "
-        "through the following contributing terms: "
+        "This programme matched the student's profile through "
+        "the following contributing terms: "
         + ", ".join(matched_features)
         + "."
     )
@@ -168,42 +303,55 @@ def generate_explanation(
     return explanation, matched_features
 
 
-# --------------------------------------------------
-# 6. MAIN RECOMMENDATION FUNCTION
-# --------------------------------------------------
+# ============================================================
+# 7. MAIN RECOMMENDATION FUNCTION
+# ============================================================
 
 def recommend_programmes(student_data, top_k=10):
+    """
+    Generate the top-k programme recommendations for one student.
+
+    Returns a pandas DataFrame with the programme information,
+    similarity score, academic/financial screening indicators,
+    and TF-IDF explanation.
+    """
+    if not isinstance(student_data, dict):
+        raise TypeError("student_data must be a dictionary.")
+
+    if not isinstance(top_k, int) or top_k < 1:
+        raise ValueError("top_k must be a positive integer.")
 
     model = load_recommender()
 
     vectorizer = model["vectorizer"]
-
     programme_vectors = model["programme_vectors"]
-
     metadata = model["programme_metadata"].copy()
 
-    # Build student profile
-    student_profile = build_student_profile(
-        student_data
-    )
+    student_profile = build_student_profile(student_data)
 
     if not student_profile.strip():
         raise ValueError(
             "Please provide at least one student profile detail."
         )
 
-    # Transform student profile using saved vectorizer
-    student_vector = vectorizer.transform(
-        [student_profile]
-    )
+    if metadata.empty or programme_vectors.shape[0] == 0:
+        return pd.DataFrame()
 
-    # Calculate cosine similarity
+    # Transform the student profile using the saved vectorizer.
+    student_vector = vectorizer.transform([student_profile])
+
+    # Calculate cosine similarity against all programme vectors.
     scores = cosine_similarity(
         student_vector,
         programme_vectors
     )[0]
 
-    # Select top programmes
+    if len(scores) != len(metadata):
+        raise ValueError(
+            "Similarity score count does not match programme metadata."
+        )
+
+    # Select the highest-scoring programmes.
     top_indices = np.argsort(-scores)[
         :min(top_k, len(scores))
     ]
@@ -215,46 +363,82 @@ def recommend_programmes(student_data, top_k=10):
     for rank, index in enumerate(top_indices, start=1):
 
         programme = metadata.iloc[index]
-
         score = float(scores[index])
-
         programme_vector = programme_vectors[index]
 
-        # Generate XAI explanation
-        explanation, matched_features = (
-            generate_explanation(
-                student_vector,
-                programme_vector,
-                feature_names
-            )
+        explanation, matched_features = generate_explanation(
+            student_vector,
+            programme_vector,
+            feature_names
         )
 
-        # Academic verification
         academic_status = check_academic_status(
             student_data,
             programme
         )
 
-        # Financial classification
         financial_status = check_financial_status(
             programme
         )
 
+        # Keep the source programme ID unchanged.
+        programme_id = get_value(
+            programme,
+            "Programme_ID",
+            "programme_id"
+        )
+
         results.append({
-            "Programme_ID": programme.get("Programme_ID"),
-            "Programme_Name": programme.get("Programme_Name"),
-            "Institution_Name": programme.get("Institution_Name"),
-            "Institution_Type": programme.get("Institution_Type"),
-            "Career_Field": programme.get("Career_Field"),
-            "Qualification_Type": programme.get("Qualification_Type"),
-            "Location": programme.get("Location"),
-            "District": programme.get("District"),
-            "Duration": programme.get("Duration"),
-            "Study_Mode": programme.get("Study_Mode"),
-            "Total_Tuition_Fee": programme.get("Total_Tuition_Fee"),
-            "Fee_Currency": programme.get("Fee_Currency"),
-            "Fee_Status": programme.get("Fee_Status"),
-            "Official_URL": programme.get("Official_URL"),
+            "Programme_ID": programme_id,
+            "Programme_Name": get_value(
+                programme, "Programme_Name", "programme_name"
+            ),
+            "Institution_Name": get_value(
+                programme, "Institution_Name", "institution_name"
+            ),
+            "Institution_Type": get_value(
+                programme, "Institution_Type", "institution_type"
+            ),
+            "Career_Field": get_value(
+                programme, "Career_Field", "career_field"
+            ),
+            "Qualification_Type": get_value(
+                programme, "Qualification_Type", "qualification_type"
+            ),
+            "Location": get_value(
+                programme, "Location", "location"
+            ),
+            "District": get_value(
+                programme, "District", "district"
+            ),
+            "Duration": get_value(
+                programme, "Duration", "duration"
+            ),
+            "Study_Mode": get_value(
+                programme, "Study_Mode", "study_mode"
+            ),
+            "Total_Tuition_Fee": get_value(
+                programme, "Total_Tuition_Fee", "total_tuition_fee"
+            ),
+            "Fee_Currency": get_value(
+                programme, "Fee_Currency", "fee_currency"
+            ),
+            "Fee_Status": get_value(
+                programme, "Fee_Status", "fee_status"
+            ),
+            "Official_URL": get_value(
+                programme, "Official_URL", "official_url"
+            ),
+            "Required_AL_Stream": get_value(
+                programme, "Required_AL_Stream", "required_al_stream"
+            ),
+            "Required_AL_Subjects": get_value(
+                programme, "Required_AL_Subjects", "required_al_subjects"
+            ),
+            "Requirements_Available": get_value(
+                programme, "Requirements_Available",
+                "requirements_available", default=False
+            ),
             "Matching_Score": round(score * 100, 4),
             "Recommendation_Rank": rank,
             "Eligibility_Status": "Needs Verification",
